@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trpc-agent-service"
+version = "0.1.0"
+description = "Multi-tenant, horizontally scalable service platform built on tRPC-Agent-Python"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "pydantic>=2.11.0",
+    "trpc-agent-py>=1.1.11,<2.0.0",
+    "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+im = [
+    "aiofiles",
+    "wecom-aibot-sdk-python>=0.1.5",
+]
+dev = [
+    "flake8",
+    "pytest>=8.0.0",
+    "pytest-asyncio",
+    "pytest-cov",
+    "yapf",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["trpc_service"]
+
+[tool.pytest.ini_options]
+addopts = "-ra -q"
+testpaths = ["tests"]
+
+[tool.yapf]
+based_on_style = "pep8"
+column_limit = 120
