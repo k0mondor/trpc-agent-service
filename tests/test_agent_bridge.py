@@ -40,8 +40,10 @@ def route() -> ResolvedRoute:
     return ResolvedRoute(
         tenant_id="tenant_acme",
         config_version=3,
+        storage_revision=4,
         agent_app_id="customer_support",
         channel_binding_id="binding_primary",
+        actor_id="actor_internal",
         internal_user_id="usr_internal",
         session_id="ses_internal",
         partition_key="tenant_acme:ses_internal",
@@ -98,7 +100,11 @@ def test_agent_context_is_created_with_trusted_platform_metadata():
         "tenant_id": "tenant_acme",
         "agent_app_id": "customer_support",
         "config_version": 3,
+        "storage_revision": 4,
         "channel_binding_id": "binding_primary",
+        "actor_id": "actor_internal",
+        "memory_scope_id": "usr_internal",
+        "session_id": route().session_id,
         "request_id": "request_1",
         "external_message_id": "message_1",
     }

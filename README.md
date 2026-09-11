@@ -1,14 +1,86 @@
 # 基于 tRPC-Agent 设计多租户节点化 Agent 部署平台
 
+## 2026-09-08 原 README 要求对应的实现入口
+
+本轮实现范围直接取自本 README 的“具体要求、题目难点、验收标准”。
+
+- 常驻 Worker 使用已发布租户配置；需要确认的 `write_artifact` 通过持久提案、IM 确认、独立 `action-worker` 保存当前会话文件的新版本。批准前不写文件，旧版本保留。
+- Admin API 支持操作员和租户身份。`TRPC_ADMIN_PRINCIPALS` 是身份配置数组，每项包含 `actor`、`role`（`tenant_admin` / `viewer`）、`tenant_ids`、`token_ref`（`env://...`），以及可用于配置的 `profile_ids`、`secret_refs`。令牌至少 32 字符且不能复用；越租户、只读身份写入、未分配的后端或密钥引用返回 403。操作员负责初次分配租户与资源。
+- 租户 Model Filter 按 `audit_policy` 处理已登记密钥、凭据模式、电子邮箱和中国大陆手机号；输出采用最终文本，避免流式分片拆开敏感值。该规则不是任意类别个人信息识别器；SDK/通道日志仍独立禁止原始正文和密钥输出。
+- 已收到供应商请求编号的费用未知调用可通过 `POST /admin/tenants/{tenant_id}/model-attempts/{attempt_id}/reconcile` 核对。接口只使用服务保存的供应商回执查询实际费用，不接受客户端声明金额；缺少回执继续保留未知费用。
+- `start.sh` / `stop.sh` / `build.sh` 使用 `docker-compose.live.yml`。先在部署环境提供该文件要求的凭据、运行 `migrate` 和 `init-resources`，再通过 Admin API 登记后端、发布租户配置和授权 IM 成员。真实通道投递由 `channel` 负责，部署不启动模拟 Dispatcher。
+
+真实验收需要本机 Python 环境安装 `.[dev,im]`，以及真实 PostgreSQL、Redis、Qdrant、MinIO 和现有 IM 凭据。可启动 `docker-compose.protected-test.yml` 并加载 `deploy/protected-test.env.example`；密钥从 `.secrets/im.json` / `.secrets/feishu.json` 读取，不要提交这些文件。
+
+```sh
+python -m trpc_service._cli live-acceptance --test-timeout 600
+# 等价入口：sh e2e.sh
+# 真实存储接管 + 真实 IM 联合验收：sh ops.sh
+```
+
+每次创建独立 PostgreSQL 测试数据库并选择空闲 Redis 逻辑库，不清空旧证据。按终端输出分别向企微和飞书发送保存口令，在 IM 内执行机器人返回的确认指令；两个 Agent Worker 重启后，再发送读取/检索口令。最终报告检查实际工具、文件内容、Memory、Summary、模型费用、投递回执与贯穿各进程的 Trace。需要用户实际看到回复的确认独立记录。群聊、断网重连和容量压测未由这四条消息自动证明。
+
+`tests/integration/dual_worker_acceptance.py`、`runtime_smoke.py` 已改用该真实入口。模拟模型/协议仍用于故障分支的组件单测，不能替代真实 IM 验收；旧 SDK 原生写契约保留为诊断，正式存储门禁检查服务自有 protected 适配器。历史开发记录和历史报告不等同于本轮通过结果。
+
 ## 当前进展
 
+- [2026-09-07 服务自有原子 Session 与租户 IM 全链路](docs/服务自有原子Session与租户IM全链路-2026-09-07.md)：按用户选择的第二种方案，通过官方公开接口实现 PostgreSQL/Redis 原子存储适配器，接入 protected 运行模式、迁移与双租户配置。附链路图、独立双 Worker 真实 IM 验收入口；本地测试已通过，真实新格式联合验收尚待 Docker 后端就绪。
+
+- [原始需求对照与范围校准](docs/第三阶段范围校准-原始需求对照-2026-09-06.md)（按用户要求严格围绕下方原题开发，保留已明确要求的 UI/真实联调，不追加商业系统、全媒体或固定登录/页面方案）
+
+- [第三阶段持久审批实现](docs/第三阶段持久审批实现-2026-09-06.md)（确认事务、独立执行器、通知恢复、后台接口及 schema 5；实际业务工具与 UI 仍待接入）
+
+- [第三阶段真实文本链路](docs/第三阶段真实文本链路实现-2026-09-06.md)（隔离 IM → 官方 Runner → 原生 SQL Session → OpenRouter 实际费用 → 投递；附两通道联调入口与验收边界）
+- [第三阶段预算治理实现](docs/第三阶段预算治理实现-2026-09-06.md)（日/月共享预算、精确结算、未知费用、Model Filter 与后台接口，schema 4）
+
+- [2026-09-06 第三阶段开发方案：IM、治理运维与管理 UI](docs/第三阶段开发方案-IM接入与治理运维-2026-09-06.md)（企业微信长连接 + Telegram；开发与验收依据）
+- [第三阶段实施进度](docs/第三阶段开发进度-2026-09-06.md)（通道、隔离、持久收发、授权预算及文本联调已实现；完整审批、媒体、管理 UI 与生产联合验收尚未完成）
+- [首次配置指南](docs/真实IM首次配置指南-2026-09-06.md)及[参考仓库源码核对记录](docs/第三阶段参考仓库源码核对-2026-09-06.md)
 - [2026-08-27 项目方案书（提交版）](docs/项目方案书-2026-08-27.md)
 - [2026-08-27 详细技术设计](docs/方案设计-2026-08-27.md)
 - [2026-08-31 第一阶段补充开发方案](docs/第一阶段补充开发方案.md)
+- [2026-09-03 第二阶段开发方案](docs/第二阶段开发方案.md)（开发与验收依据）
+- [2026-09-05 第二阶段补全开发方案](docs/第二阶段补全开发方案-2026-09-05.md)（补全顺序与完整验收标准）
+- [2026-09-05 双 Worker 服务运行与验收](docs/双Worker服务运行与验收-2026-09-05.md)（持续消费、独立投递、原生结果恢复与派生任务；当前为显式模拟模式，SDK 原子写保护仍阻断生产发布）
+- [2026-09-04 第二阶段验收报告](docs/第二阶段验收报告.md)（实现范围、真实后端与可复现命令）
+- [2026-09-05 迁移与后端切换 E2E](docs/第二阶段迁移E2E测试说明.md)及[已知缺陷修复验收](docs/已知缺陷修复与验收-2026-09-05.md)（原五项迁移失败与模型状态失败已修复；第二阶段完整生产验收仍有未覆盖能力）
+- [运维架构与容量评估](docs/运维架构与容量评估.md)（故障降级、灰度回滚、架构/时序与部署）及[实测容量报告](docs/容量基准报告-2026-09-05.md)（两种后端、8 个并发档位；模型与通道为模拟）
 - 第一阶段运行内核已经完成：租户后端 namespace 强隔离、Channel Binding 验签顺序、租户/Binding/应用状态路由、单聊/群聊/线程 HMAC 身份、精确 Runner Registry、AgentContext 元数据注入、工具白名单和安全通道事件投影。
 - 双租户 Fake Adapter/Fake Runner 验收链路已经覆盖相同外部用户的租户隔离、精确 Runner 选择、上下文隔离、安全输出和验签失败零执行。
 - 真实内核 E2E 使用 tRPC-Agent `Runner`、`LlmAgent`、`FunctionTool` 和共享 InMemory Session，覆盖双租户两轮会话、真实工具调用、模型错误隔离以及 v3→v4→v3 灰度回滚。
-- 本地验证：`pytest`，当前共 47 项测试通过；`flake8` 零问题。
+- 第二阶段共享状态与可靠性层已经实现：版本化 Storage Resolver、tRPC Session/Memory/Summary 公共接口包装、SQL Inbox/Outbox、lease/fencing/revision CAS、工具账本、Durable Post-turn、MinIO Artifact、Local/Qdrant Knowledge、Audit、Redis→SQL Session 复制与版本化向量迁移。
+- Docker Compose 可启动 Gateway、两个 Worker、PostgreSQL/pgvector、Redis AOF、Qdrant、MinIO 和 OpenTelemetry Collector；真实探针覆盖三种 Session 后端的一致契约、跨实例 Memory、Redis→SQL 复制、Local→Qdrant 迁移和 S3 Artifact。
+- 2026-09-05 修复后完整本地回归：117 passed、4 skipped（MinIO 与网络故障测试需 real 模式），无 xfail。新构建镜像上的完整真实后端严格回归：121 passed，无 skip/xfail，含运维故障 6 项全部通过。迁移要求目标停写，尚不能证明在线迁移和完整双 Worker 故障恢复。详见已知缺陷修复验收报告。
+
+## 第二阶段运行与验收
+
+SDK 基线为官方 `trpc-group/trpc-agent-python` 的固定提交 `f05797d9f9dff2461922b5985aeccc1b636b7c8d`，
+不使用本地二开或 fork。下方历史报告中的 fork 测试只作为历史记录，最终结果以本次官方 SDK 验收为准。
+
+新增双 Worker 模拟闭环可通过 `docker compose up -d --build gateway worker-1 worker-2 dispatcher post-turn`
+启动，通过 `python tests/integration/dual_worker_acceptance.py` 验证跨进程上下文、最终原生写入后的进程退出、
+100 条实际投递及派生任务重启追平。生产模式不会静默使用模拟模型；当前仍未达到第二阶段全部完成标准。
+
+```bash
+# 启动最小多节点环境
+sh start.sh
+
+# 独立执行真实四后端验收，结束后自动停止环境
+sh integration.sh
+
+# 真实迁移与后端切换严格验收
+sh e2e.sh
+
+# 运维故障验收和容量测量，输出到 reports
+sh ops.sh
+
+# 本地质量检查
+python -m pytest -q
+flake8 trpc_service tests
+git diff --check
+```
+
+`integration.sh` 使用独立的 `trpc` 平台数据库和 `trpc_runtime` tRPC Session 数据库，避免框架表与平台表同名冲突。真实 IM 凭据、在线模型吞吐和生产 Kubernetes 清单不包含在本阶段代码中；接口语义、指标和生产拓扑约束记录在开发方案内。
 
 ## 背景和价值
 企业在落地 Agent 应用时，通常不会只部署一个单体机器人，而是希望面向多个部门、多个业务线、多个 IM 入口和多个数据后端
@@ -117,3 +189,9 @@ tRPC-Agent-Python 已经具备 Agent 编排、Tool / MCP、Session、Memory、Kn
     |-- web # 提供网页版本页面可以访问服务
     `-- workspace # 工作目录,包含本地,容器等沙箱环境
 ```
+
+第二阶段新增后端配置管理 API：支持后端登记、租户配置保存、原子发布与配置回滚、管理审计，以及 Worker 按消息固定版本加载。启用数据库管理模式见 [运行说明](docs/后端配置管理运行说明-2026-09-05.md)。
+
+工具执行、六类资源装配、持久化迁移、会话灰度和观测的后续实现及生产边界，见 [第二阶段运行时补全记录](docs/第二阶段运行时补全与边界-2026-09-06.md)。官方最新 SDK 仍缺原生写入 fencing/CAS，生产模式门禁保留。
+
+实际双通道验收采用企业微信智能机器人与飞书企业自建应用机器人，开发、配置和测试边界见 [飞书适配与企微双通道测试](docs/飞书适配与企微双通道测试-2026-09-07.md)。Telegram 协议实现保留；双通道测试不要求 Telegram 账号。

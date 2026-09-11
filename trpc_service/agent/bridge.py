@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from enum import Enum
+import time
+import re
 
 from pydantic import BaseModel
 from pydantic import ConfigDict
@@ -20,6 +22,7 @@ from trpc_service.tenant import ResolvedRoute
 
 from .runtime import RunnerRegistry
 from .runtime import tenant_app_name
+from trpc_service.telemetry.runtime import observe, count
 
 
 class AgentChannelEventType(str, Enum):
@@ -41,6 +44,7 @@ class AgentChannelEvent(BaseModel):
     text: str | None = None
     tool_name: str | None = None
     error_type: str | None = None
+    action_id: str | None = None
 
 
 class RunnerRouteMismatchError(RuntimeError):
@@ -104,11 +108,18 @@ def project_agent_event(event: Event) -> tuple[AgentChannelEvent, ...]:
                     tool_name=part.function_call.name,
                 ))
         elif part.function_response:
+            response = part.function_response.response
+            action_id = response.get("action_id") if isinstance(response, dict) else None
+            awaiting = (isinstance(action_id, str) and re.fullmatch(r"[a-f0-9]{32}", action_id) is not None
+                        and response.get("status") == "awaiting_confirmation"
+                        and event.actions.skip_summarization)
             projected.append(
                 AgentChannelEvent(
                     type=AgentChannelEventType.TOOL_RESULT,
                     event_id=event.id,
                     tool_name=part.function_response.name,
+                    final=bool(awaiting),
+                    action_id=action_id if awaiting else None,
                 ))
     return tuple(projected)
 
@@ -125,7 +136,11 @@ def build_agent_context(
         "tenant_id": route.tenant_id,
         "agent_app_id": route.agent_app_id,
         "config_version": route.config_version,
+        "storage_revision": route.storage_revision,
         "channel_binding_id": route.channel_binding_id,
+        "actor_id": route.actor_id,
+        "memory_scope_id": route.internal_user_id,
+        "session_id": route.session_id,
         "request_id": message.request_id,
         "external_message_id": message.external_message_id,
     }
@@ -153,11 +168,22 @@ async def run_normalized_message(
             f"runner app_name does not match routed tenant application: expected {expected_app_name}")
     content = build_user_content(message, attachment_uri_resolver)
     context = build_agent_context(route, message, agent_context)
+    started, first_response = time.perf_counter(), True
+    run_config = runner_registry.run_configs.get((route.tenant_id, route.agent_app_id, route.config_version))
     async for event in runner.run_async(
         user_id=route.internal_user_id,
         session_id=route.session_id,
         new_message=content,
         agent_context=context,
+        **({"run_config": run_config} if run_config else {}),
     ):
+        if first_response:
+            observe("model.first_event_latency_ms", (time.perf_counter() - started) * 1000)
+            first_response = False
+        if event.usage_metadata and not event.partial:
+            total = getattr(event.usage_metadata, "total_token_count", None)
+            if total is not None:
+                count("model.tokens", total)
         for projected in project_agent_event(event):
             yield projected
+    observe("model.total_latency_ms", (time.perf_counter() - started) * 1000)

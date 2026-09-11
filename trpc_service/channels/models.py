@@ -17,6 +17,7 @@ class ChannelType(str, Enum):
     WEB = "web"
     WECOM = "wecom"
     TELEGRAM = "telegram"
+    FEISHU = "feishu"
 
 
 class ConversationType(str, Enum):

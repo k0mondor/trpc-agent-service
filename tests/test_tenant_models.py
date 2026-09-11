@@ -60,3 +60,11 @@ def test_duplicate_callback_identity_is_rejected():
     data["channel_bindings"] = bindings
     with pytest.raises(ValidationError, match="duplicate webhook public"):
         type(tenant).model_validate(data)
+
+
+def test_summary_must_follow_session_backend(tenant):
+    data = tenant.model_dump()
+    data["data_backends"]["summary"]["kind"] = "sql"
+    data["data_backends"]["summary"]["profile_id"] = "sql_prod"
+    with pytest.raises(ValidationError, match="summary must use"):
+        type(tenant).model_validate(data)

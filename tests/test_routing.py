@@ -55,7 +55,8 @@ def test_different_groups_get_different_sessions(tenant):
     group_a = router.route(InboundRouteRequest(**base, external_chat_id="group_a"))
     group_b = router.route(InboundRouteRequest(**base, external_chat_id="group_b"))
 
-    assert group_a.internal_user_id == group_b.internal_user_id
+    assert group_a.actor_id == group_b.actor_id
+    assert group_a.internal_user_id != group_b.internal_user_id
     assert group_a.session_id != group_b.session_id
 
 

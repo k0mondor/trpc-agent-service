@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+
 from trpc_service.channels import ChannelType
 from trpc_service.tenant import AgentApplicationConfig
 from trpc_service.tenant import AuditPolicy
@@ -19,12 +20,33 @@ from trpc_service.tenant import TenantConfig
 from trpc_service.tenant import ToolPolicy
 
 
+def pytest_addoption(parser):
+    parser.addoption("--backend-mode", choices=("local", "real"), default="local",
+                     help="Migration E2E: embedded backends or real Compose services (no fallback).")
+    parser.addoption("--strict-acceptance", action="store_true",
+                     help="Treat documented E2E implementation gaps as failures, not expected failures.")
+
+
+def pytest_sessionstart(session):
+    from trpc_service.sdk_provenance import verify_official_sdk
+
+    verify_official_sdk()
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        gap = item.get_closest_marker("known_gap")
+        if gap and not config.getoption("--strict-acceptance"):
+            item.add_marker(pytest.mark.xfail(reason=gap.args[0], strict=True, raises=AssertionError))
+
+
 def build_tenant(tenant_id: str = "tenant_acme", webhook_public_id: str = "callback_acme") -> TenantConfig:
     namespace = tenant_id
     return TenantConfig(
         tenant_id=tenant_id,
         name=f"{tenant_id} display name",
         config_version=3,
+        storage_revision=4,
         applications=(
             AgentApplicationConfig(
                 app_id="customer_support",
@@ -67,7 +89,7 @@ def build_tenant(tenant_id: str = "tenant_acme", webhook_public_id: str = "callb
         data_backends=DataBackendConfig(
             session=BackendRef(kind=BackendKind.REDIS, profile_id="redis_prod", namespace=namespace),
             memory=BackendRef(kind=BackendKind.SQL, profile_id="sql_prod", namespace=namespace),
-            summary=BackendRef(kind=BackendKind.SQL, profile_id="sql_prod", namespace=namespace),
+            summary=BackendRef(kind=BackendKind.REDIS, profile_id="redis_prod", namespace=namespace),
             knowledge=BackendRef(kind=BackendKind.VECTOR, profile_id="vector_prod", namespace=namespace),
             artifact=BackendRef(kind=BackendKind.OBJECT, profile_id="object_prod", namespace=namespace),
             audit=BackendRef(kind=BackendKind.SQL, profile_id="sql_audit", namespace=namespace),

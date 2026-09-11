@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import Enum
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
@@ -60,6 +61,45 @@ class SecretRef(BaseModel):
         return value
 
 
+class MCPServerConfig(BaseModel):
+    """Tenant application MCP endpoint and its trusted server identifier."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    server_id: str = Field(pattern=_IDENTIFIER_PATTERN)
+    endpoint: str = Field(min_length=8, max_length=2048)
+    secret_ref: SecretRef | None = None
+    enabled: bool = True
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password
+                or parsed.query or parsed.fragment):
+            raise ValueError("MCP endpoint must be an absolute HTTP(S) URL")
+        return value.rstrip("/")
+
+
+class EmbeddingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    model_name: str = Field(min_length=1, max_length=255)
+    api_key_ref: SecretRef
+    base_url: str = "https://openrouter.ai/api/v1"
+    dimensions: int = Field(ge=1, le=65536)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_url(cls, value):
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("embedding endpoint must be HTTP(S) without credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError("embedding endpoint cannot contain a query or fragment")
+        return value.rstrip("/")
+
+
 class ModelConfig(BaseModel):
     """Tenant-owned LLM routing, reliability and budget settings."""
 
@@ -111,10 +151,18 @@ class AgentApplicationConfig(BaseModel):
     instruction: str = Field(min_length=1, max_length=100_000)
     instruction_version: int = Field(default=1, ge=1)
     tool_policy: ToolPolicy = ToolPolicy()   # 只属于本应用的工具策略
+    mcp_servers: tuple[MCPServerConfig, ...] = ()
     knowledge_base_ids: tuple[str, ...] = ()  # 知识库
     max_tool_iterations: int = Field(default=20, ge=0, le=500)
     run_timeout_seconds: float = Field(default=120.0, gt=0.0)
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_mcp_servers(self) -> "AgentApplicationConfig":
+        ids = [item.server_id for item in self.mcp_servers]
+        if len(ids) != len(set(ids)):
+            raise ValueError("duplicate MCP server identifier")
+        return self
 
 
 class ChannelCredentialRef(BaseModel):
@@ -143,6 +191,16 @@ class ChannelBindingConfig(BaseModel):
     credential_refs: tuple[ChannelCredentialRef, ...] = ()
     reply_mode: ReplyMode = ReplyMode.ASYNC
     enabled: bool = True
+    group_mode: Literal["per_user", "shared"] = "per_user"
+    identity_version: Literal[2] = 2
+    conversation_epoch: int = Field(default=1, ge=1)
+    transport: Literal["none", "wecom_ws", "telegram_polling", "telegram_webhook", "feishu_ws"] = "none"
+
+    @model_validator(mode="after")
+    def validate_transport(self):
+        if self.transport != "none" and not self.transport.startswith(self.channel.value + "_"):
+            raise ValueError("transport does not belong to the selected channel")
+        return self
 
     @field_validator("credential_refs")
     @classmethod
@@ -187,6 +245,8 @@ class DataBackendConfig(BaseModel):
             raise ValueError("artifact backend must be object")
         if self.audit.kind is not BackendKind.SQL:
             raise ValueError("audit backend must be sql")
+        if (self.summary.kind, self.summary.profile_id) != (self.session.kind, self.session.profile_id):
+            raise ValueError("summary must use the same backend kind and profile as session")
         return self
 
 
@@ -196,12 +256,26 @@ class AuditPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     retention_days: int = Field(default=180, ge=1, le=3650)
+    # SQL hot retention is applied only after an authenticated archive is read
+    # back successfully. Archive objects have a separate operator lifecycle.
+    archive_enabled: bool = False
     record_prompt_body: bool = False
     record_response_body: bool = False
     hash_external_identifiers: bool = True
     redact_pii: bool = True
     redact_secrets: bool = True
     allowed_viewer_roles: frozenset[str] = frozenset({"tenant_auditor"})
+
+
+class ResourcePolicy(BaseModel):
+    """Persisted admission limits used by every worker for a tenant."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_concurrent_runs: int = Field(default=4, ge=1, le=1000)
+    max_queued_messages: int = Field(default=1000, ge=1, le=1_000_000)
+    requests_per_minute: int = Field(default=600, ge=1, le=1_000_000)
+    priority: int = Field(default=100, ge=0, le=1000)
 
 
 class TenantConfig(BaseModel):
@@ -213,11 +287,14 @@ class TenantConfig(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     status: TenantStatus = TenantStatus.ACTIVE
     config_version: int = Field(default=1, ge=1)
+    storage_revision: int = Field(default=1, ge=1)
     applications: tuple[AgentApplicationConfig, ...]
     models: tuple[ModelConfig, ...]
     channel_bindings: tuple[ChannelBindingConfig, ...]
     data_backends: DataBackendConfig
     audit_policy: AuditPolicy = AuditPolicy()
+    resource_policy: ResourcePolicy = ResourcePolicy()
+    embedding: EmbeddingConfig | None = None
 
     @model_validator(mode="after")
     def validate_references_and_uniqueness(self) -> "TenantConfig":

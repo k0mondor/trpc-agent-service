@@ -35,6 +35,7 @@ def select_tools_for_runner(available_tools: Iterable[BaseTool], policy: ToolPol
     """Apply one application's ToolPolicy before constructing its Agent and Runner."""
 
     tools = tuple(available_tools)
+    from trpc_service.governance.action_tools import ProposalTool
     tools_by_name = {tool.name: tool for tool in tools}
     configured_names = policy.allow | policy.deny | policy.require_confirmation
     unknown_names = configured_names - tools_by_name.keys()
@@ -44,7 +45,7 @@ def select_tools_for_runner(available_tools: Iterable[BaseTool], policy: ToolPol
     return tuple(
         tool for tool in tools
         if tool.name not in policy.deny
-        and tool.name not in policy.require_confirmation
+        and (tool.name not in policy.require_confirmation or isinstance(tool, ProposalTool))
         and (not policy.default_deny or tool.name in policy.allow)
     )
 
@@ -54,6 +55,8 @@ class RunnerRegistry:
 
     def __init__(self) -> None:
         self._runners: dict[RuntimeKey, Runner] = {}
+        self.run_configs = {}
+        self.protected_sessions = {}
 
     def register(
         self,

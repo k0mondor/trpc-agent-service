@@ -8,7 +8,9 @@ from .models import ChannelBindingConfig
 from .models import ChannelCredentialRef
 from .models import DataBackendConfig
 from .models import ModelConfig
+from .models import MCPServerConfig
 from .models import ReplyMode
+from .models import ResourcePolicy
 from .models import SecretRef
 from .models import TenantConfig
 from .models import TenantStatus
@@ -33,7 +35,9 @@ __all__ = [
     "InboundRouteRequest",
     "MessageRouter",
     "ModelConfig",
+    "MCPServerConfig",
     "ReplyMode",
+    "ResourcePolicy",
     "ResolvedRoute",
     "RouteNotFoundError",
     "SecretRef",

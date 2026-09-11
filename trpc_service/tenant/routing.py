@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 from collections.abc import Callable
 from collections.abc import Iterable
 
@@ -56,8 +57,10 @@ class ResolvedRoute(BaseModel):
 
     tenant_id: str
     config_version: int
+    storage_revision: int
     agent_app_id: str
     channel_binding_id: str
+    actor_id: str
     internal_user_id: str
     session_id: str
     partition_key: str
@@ -103,28 +106,28 @@ class SessionIdentityFactory:
         key = self._tenant_key_resolver(tenant_id)
         if len(key) < 32:
             raise ValueError("tenant session key must contain at least 32 bytes")
-        payload = "\x1f".join((purpose, tenant_id, *parts)).encode("utf-8")
+        payload = json.dumps([2, purpose, tenant_id, *parts], ensure_ascii=False,
+                             separators=(",", ":")).encode("utf-8")
         return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
     def internal_user_id(self, tenant_id: str, binding_id: str, external_user_id: str) -> str:
         return f"usr_{self._digest(tenant_id, 'user', binding_id, external_user_id)[:32]}"
 
+    def scope_parts(self, binding: ChannelBindingConfig, request: InboundRouteRequest) -> tuple[str, ...]:
+        direct = request.conversation_type is ConversationType.DIRECT
+        return (binding.channel.value, binding.binding_id, binding.agent_app_id,
+                request.conversation_type.value,
+                request.external_user_id if direct else request.external_chat_id or "",
+                request.thread_id or "",
+                request.external_user_id if direct or binding.group_mode == "per_user" else "shared",
+                str(binding.conversation_epoch))
+
+    def storage_user_id(self, tenant_id: str, binding: ChannelBindingConfig, request: InboundRouteRequest) -> str:
+        """SDK user scope includes the chat/topic; actor identity remains separate."""
+        return "scp_" + self._digest(tenant_id, "storage_user", *self.scope_parts(binding, request))[:40]
+
     def session_id(self, tenant_id: str, binding: ChannelBindingConfig, request: InboundRouteRequest) -> str:
-        if request.conversation_type is ConversationType.DIRECT:
-            conversation_id = request.external_user_id
-        else:
-            conversation_id = request.external_chat_id or ""
-        thread_id = request.thread_id or ""
-        digest = self._digest(
-            tenant_id,
-            "session",
-            binding.binding_id,
-            binding.agent_app_id,
-            request.conversation_type.value,
-            conversation_id,
-            thread_id,
-        )
-        return f"ses_{digest[:40]}"
+        return "ses_" + self._digest(tenant_id, "session", *self.scope_parts(binding, request))[:40]
 
 
 class MessageRouter:
@@ -165,13 +168,16 @@ class MessageRouter:
         binding: ChannelBindingConfig,
         request: InboundRouteRequest,
     ) -> ResolvedRoute:
-        user_id = self._identities.internal_user_id(tenant.tenant_id, binding.binding_id, request.external_user_id)
+        actor_id = self._identities.internal_user_id(tenant.tenant_id, binding.binding_id, request.external_user_id)
+        user_id = self._identities.storage_user_id(tenant.tenant_id, binding, request)
         session_id = self._identities.session_id(tenant.tenant_id, binding, request)
         return ResolvedRoute(
             tenant_id=tenant.tenant_id,
             config_version=tenant.config_version,
+            storage_revision=tenant.storage_revision,
             agent_app_id=binding.agent_app_id,
             channel_binding_id=binding.binding_id,
+            actor_id=actor_id,
             internal_user_id=user_id,
             session_id=session_id,
             partition_key=f"{tenant.tenant_id}:{session_id}",
