@@ -30,6 +30,10 @@ class DuplicatePayloadError(ValueError):
     pass
 
 
+class MessageRecalledError(RuntimeError):
+    pass
+
+
 class InboxDisposition(str, Enum):
     ACCEPTED = "accepted"
     DUPLICATE = "duplicate"
@@ -69,6 +73,19 @@ class InboxRepository:
     @property
     def database(self):
         return self._database
+
+    def is_recalled(self, inbound_message_id: str) -> bool:
+        with self._database.sessions() as session:
+            row = session.get(InboundMessageRow, inbound_message_id)
+            return row is not None and row.error_type == "message_recalled"
+
+    def require_active(self, work, worker_id: str) -> None:
+        with self._database.sessions() as session:
+            row = session.get(InboundMessageRow, work.inbound_message_id)
+            if row is not None and row.error_type == "message_recalled":
+                raise MessageRecalledError("inbound message was recalled")
+            if row is None or row.status != "processing" or row.lease_owner != worker_id or row.attempt != work.attempt:
+                raise RuntimeError("inbound execution is no longer active")
 
     def accept(self, **values) -> InboxReceipt:
         with self._database.sessions.begin() as session:

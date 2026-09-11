@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import suppress
+import hashlib
 import logging
 import os
 import random
@@ -10,6 +11,8 @@ import uuid
 from trpc_service.telemetry.runtime import operation, count
 from trpc_service.tenant import ChannelBindingRegistry, MessageRouter, SessionIdentityFactory
 from trpc_service.storage.runtime_resources import resolve_env
+from .events import safe_media_filename
+from .models import AttachmentRef, NormalizedInboundMessage
 from .persistence import ContextCipher, IMAccounts, IMIngress, AccountOwnershipError
 from .delivery import IMDeliveryWorker
 
@@ -36,6 +39,8 @@ class ChannelRuntime:
         self.accounts = IMAccounts(database)
         self.ingress = IMIngress(database, self.cipher, self.identities)
         self.owner_id = owner_id or "channel-" + uuid.uuid4().hex
+        self._artifact_services = {}
+        self._artifact_lock = asyncio.Lock()
         quiet_transport_logging()
 
     @staticmethod
@@ -71,6 +76,9 @@ class ChannelRuntime:
             for _, task in tasks.values():
                 task.cancel()
             await asyncio.gather(*(task for _, task in tasks.values()), return_exceptions=True)
+            await asyncio.gather(*(service.close() for service in self._artifact_services.values()),
+                                 return_exceptions=True)
+            self._artifact_services.clear()
 
     async def consume_account(self, tenant, binding, stop):
         while not stop.is_set():
@@ -79,7 +87,7 @@ class ChannelRuntime:
                 lease = await asyncio.to_thread(self.accounts.acquire, binding, self.owner_id)
                 if lease:
                     router = MessageRouter(ChannelBindingRegistry([tenant]), self.identities)
-                    await self.run_owned(binding, lease, router, stop)
+                    await self.run_owned(tenant, binding, lease, router, stop)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -94,7 +102,7 @@ class ChannelRuntime:
             except asyncio.TimeoutError:
                 pass
 
-    async def run_owned(self, binding, lease, router, stop):
+    async def run_owned(self, tenant, binding, lease, router, stop):
         tasks, adapter = [], None
         try:
             if binding.transport == "telegram_polling":
@@ -114,11 +122,13 @@ class ChannelRuntime:
                 await adapter.initialize()
                 receive = adapter.receive(binding,
                                           lambda event: self.record(event, binding, lease, router),
+                                          transform=lambda event: self.materialize_media(
+                                              event, adapter, tenant, binding, router),
                                           on_ready=lambda: self.connection_ready(binding))
             else:
                 from .wecom import WecomAdapter
                 adapter = WecomAdapter.create(binding.external_account_id, self.credential(binding, "bot_secret"))
-                receive = self.receive_wecom(adapter, binding, lease, router)
+                receive = self.receive_wecom(adapter, tenant, binding, lease, router)
             delivery = IMDeliveryWorker(self.database, lease, adapter, self.cipher)
             from trpc_service.governance.action_delivery import ActionNoticeWorker
             notices = ActionNoticeWorker(self.database, lease, adapter, self.cipher)
@@ -185,6 +195,59 @@ class ChannelRuntime:
             count("im.ingress", channel=binding.channel.value, disposition=receipt.disposition)
             return receipt
 
+    async def artifact_service(self, tenant):
+        key = (tenant.tenant_id, tenant.config_version)
+        async with self._artifact_lock:
+            if key not in self._artifact_services:
+                from trpc_service.storage.runtime_resources import build_artifact_resource
+                self._artifact_services[key] = await build_artifact_resource(self.store, tenant, self.database)
+            return self._artifact_services[key]
+
+    async def materialize_media(self, event, adapter, tenant, binding, router):
+        if not event.pending_media:
+            return event
+        if not await asyncio.to_thread(self.ingress.authorized, event, binding):
+            return event.model_copy(update={"pending_media": ()})
+        route = await asyncio.to_thread(self.store.route_message, event.message)
+        expected = router.route_message(event.message, expected_binding=binding)
+        if route.model_copy(update={"config_version": expected.config_version}) != expected:
+            raise AccountOwnershipError("binding identity changed during media staging")
+        service = await self.artifact_service(tenant)
+        from trpc_agent_sdk.abc import ArtifactId
+        from trpc_agent_sdk.artifacts import create_artifact_uri
+        from trpc_agent_sdk.types import Part
+        attachments = []
+        for pending in event.pending_media:
+            payload, filename, mime_type = await adapter.download_media(
+                pending, event.reply_context.get("message_id"))
+            digest = hashlib.sha256(payload).hexdigest()
+            filename = hashlib.sha256(event.event_id.encode()).hexdigest()[:12] + "-" + safe_media_filename(
+                filename, pending.kind)
+            artifact_id = ArtifactId(app_name=tenant.tenant_id + ":" + binding.agent_app_id,
+                                     user_id=route.internal_user_id,
+                                     session_id=route.session_id,
+                                     filename=filename)
+            existing = await service.load_artifact(artifact_id=artifact_id)
+            if existing is not None:
+                metadata = existing.version.custom_metadata or {}
+                if metadata.get("sha256") != digest:
+                    raise ValueError("media event was reused with different content")
+                version = existing.version.version
+            else:
+                version = await service.save_artifact(
+                    artifact_id=artifact_id,
+                    artifact=Part.from_bytes(data=payload, mime_type=mime_type),
+                    metadata={"source": binding.channel.value, "sha256": digest})
+            attachments.append(AttachmentRef(artifact_id=create_artifact_uri(artifact_id, version),
+                                             filename=filename,
+                                             mime_type=mime_type,
+                                             size_bytes=len(payload),
+                                             sha256=digest))
+        message_data = event.message.model_dump(mode="json")
+        message_data.update(text="", attachments=[item.model_dump(mode="json") for item in attachments])
+        message = NormalizedInboundMessage.model_validate(message_data)
+        return event.model_copy(update={"message": message, "pending_media": ()})
+
     async def poll_telegram(self, adapter, binding, lease, router):
         while True:
             offset = await asyncio.to_thread(self.accounts.offset, lease)
@@ -196,7 +259,7 @@ class ChannelRuntime:
                                   router,
                                   next_offset=update.update_id + 1)
 
-    async def receive_wecom(self, adapter, binding, lease, router):
+    async def receive_wecom(self, adapter, tenant, binding, lease, router):
         lost, authenticated = asyncio.Event(), asyncio.Event()
 
         async def disconnected(_):
@@ -207,7 +270,9 @@ class ChannelRuntime:
 
         async def receive(frame):
             try:
-                await self.record(adapter.normalize(frame, binding), binding, lease, router)
+                event = adapter.normalize(frame, binding)
+                event = await self.materialize_media(event, adapter, tenant, binding, router)
+                await self.record(event, binding, lease, router)
             except Exception as error:
                 # The public client swallows handler exceptions; force connection teardown.
                 self.connection_failed(binding, error)

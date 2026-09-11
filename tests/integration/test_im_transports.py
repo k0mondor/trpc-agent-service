@@ -151,7 +151,9 @@ def test_telegram_callback_is_control_not_agent_text(tenant):
 async def test_wecom_ack_finish_and_account_authentication(tenant):
     binding = tenant.channel_bindings[0]
     client = SimpleNamespace(is_authenticated=True,
-                             reply_stream=AsyncMock(return_value=WsFrame(headers={"req_id": "ack-1"}, errcode=0)))
+                             reply_stream=AsyncMock(return_value=WsFrame(headers={"req_id": "ack-1"}, errcode=0)),
+                             send_message=AsyncMock(return_value=WsFrame(headers={"req_id": "ack-2"}, errcode=0)),
+                             download_file=AsyncMock(return_value=(b"synthetic-file", "note.txt")))
     adapter = WecomAdapter(client)
     frame = WsFrame(headers={"req_id": "req-1"},
                     cmd="aibot_msg_callback",
@@ -171,6 +173,20 @@ async def test_wecom_ack_finish_and_account_authentication(tenant):
     result = await adapter.send_text(event.reply_context, "reply", stream_id="stream-1")
     client.reply_stream.assert_awaited_once_with({"req_id": "req-1"}, "stream-1", "reply", finish=True)
     assert result.receipt_kind == "protocol_ack" and result.external_message_id is None
+    continuation = await adapter.send_text(event.reply_context, "part two", stream_id="stream-1", part_no=1)
+    client.send_message.assert_awaited_once_with("alice", {
+        "msgtype": "markdown", "markdown": {"content": "part two"}})
+    assert continuation.provider_request_id == "ack-2"
+    media_frame = WsFrame(headers={"req_id": "req-2"}, cmd="aibot_msg_callback", body={
+        **frame.body, "msgid": "msg-2", "msgtype": "file",
+        "file": {"url": "https://media.example.test/file", "aeskey": "synthetic-key", "name": "note.txt"}})
+    media = adapter.normalize(media_frame, binding)
+    assert media.pending_media[0].kind == "file"
+    assert await adapter.download_media(media.pending_media[0], "msg-2") == (
+        b"synthetic-file", "note.txt", "text/plain")
+    client.reply_stream.return_value = WsFrame(headers={"req_id": "rate"}, errcode=45009)
+    limited = await adapter.send_text(event.reply_context, "reply", stream_id="stream-2")
+    assert limited.retryable and limited.error_type == "rate_limited"
     client.reply_stream.side_effect = TimeoutError("auth secret must not escape")
     assert (await adapter.send_text(event.reply_context, "reply", stream_id="stream-1")).outcome == "unknown"
     frame.body["aibotid"] = "another-account"

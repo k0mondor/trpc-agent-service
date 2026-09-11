@@ -96,18 +96,16 @@ class IMDeliveryWorker:
                 row.status, row.error_type = "delivery_unknown", "owner_interrupted"
                 return {"internal": True}
             text = row.payload_json.get("text", "")
+            inbound = session.get(InboundMessageRow, row.inbound_message_id)
+            if inbound is None or inbound.error_type == "message_recalled":
+                row.status, row.error_type = "dead_letter", "message_recalled"
+                return {"internal": True}
             if not text:
                 row.status, row.error_type = "dead_letter", "unsupported_reply"
                 return {"internal": True}
-            chunks = split_text(
-                text,
-                4096 if self.lease.channel == "telegram" else 3000 if self.lease.channel == "feishu" else 20480,
-                unit="characters" if self.lease.channel == "telegram" else "utf8_bytes")
-            # WeCom stream continuation semantics beyond one stream are not equivalent to
-            # Telegram multipart sends. Reject overflow until media/card rendering is installed.
-            if self.lease.channel == "wecom" and len(chunks) > 1:
-                row.status, row.error_type = "dead_letter", "wecom_text_too_long"
-                return {"internal": True}
+            limit = getattr(self.adapter, "text_limit", 4096)
+            unit = getattr(self.adapter, "text_unit", "characters")
+            chunks = split_text(text, limit, unit=unit)
             completed = {attempt.part_no for attempt in attempts if attempt.outcome == "accepted"}
             part = next((index for index in range(len(chunks)) if index not in completed), None)
             if part is None:
@@ -133,7 +131,6 @@ class IMDeliveryWorker:
                                      network_started_at=now))
             row.status = "im_sending"
             row.attempt += 1
-            inbound = session.get(InboundMessageRow, row.inbound_message_id)
             return {
                 "attempt_id": attempt_id,
                 "outbox_id": row.outbox_message_id,
@@ -183,7 +180,8 @@ class IMDeliveryWorker:
                            "channel": self.lease.channel
                        }):
             try:
-                kwargs = {"stream_id": work["outbox_id"], "final": True} if self.lease.channel == "wecom" else {}
+                kwargs = ({"stream_id": work["outbox_id"], "final": True, "part_no": work["part"]}
+                          if self.lease.channel == "wecom" else {})
                 if self.lease.channel == "feishu":
                     kwargs = {"idempotency_key": work["outbox_id"] + "-" + str(work["part"])}
                 result = await asyncio.wait_for(self.adapter.send_text(work["context"], work["text"], **kwargs),
@@ -192,5 +190,7 @@ class IMDeliveryWorker:
                 result = DeliveryResult(outcome="unknown", error_type="transport_outcome_unknown")
             # Cancellation leaves 'sending'; takeover resolves it as unknown, never as pending.
             await asyncio.to_thread(self.finish, work, result)
+            if result.error_type == "rate_limited":
+                count("im.rate_limited", channel=self.lease.channel)
             count("im.delivery", channel=self.lease.channel, outcome=result.outcome)
         return True

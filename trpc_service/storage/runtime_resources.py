@@ -35,6 +35,26 @@ def resolve_env(uri):
     return os.environ[uri[6:]]
 
 
+async def build_artifact_resource(store, tenant, database):
+    """Build only the tenant object store needed by the channel process."""
+    from minio import Minio
+
+    profile = store.resource_profile(tenant.tenant_id, tenant.config_version, "artifact")
+    if profile.kind.value != "object":
+        raise ValueError("inbound media requires an object artifact backend")
+    client = Minio(resolve_env(profile.secret_ref.uri),
+                   access_key=resolve_env(profile.options.get("access_key_ref",
+                                                              "env://TRPC_MINIO_ACCESS_KEY")),
+                   secret_key=resolve_env(profile.options.get("secret_key_ref",
+                                                              "env://TRPC_MINIO_SECRET_KEY")),
+                   secure=profile.options.get("secure", True))
+    return await asyncio.to_thread(S3ArtifactService,
+                                   tenant_id=tenant.tenant_id,
+                                   bucket=profile.options.get("bucket", "trpc-artifacts"),
+                                   client=client,
+                                   database=database)
+
+
 async def build_resources(store, tenant, database):
     from minio import Minio
     from qdrant_client import QdrantClient

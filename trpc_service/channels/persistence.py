@@ -12,6 +12,8 @@ from trpc_service.persistence.models import (
     IMAccountRow,
     IMEventReceiptRow,
     IMMembershipRow,
+    InboundMessageRow,
+    OutboxMessageRow,
     TenantRow,
     ChannelBindingRow,
 )
@@ -157,6 +159,15 @@ class IMIngress:
         self.database, self.cipher, self.identities = database, cipher, identities
         self.inbox = InboxRepository(database)
 
+    def authorized(self, event, binding) -> bool:
+        if not event.external_actor_id:
+            return False
+        actor_id = self.identities.internal_user_id(binding.tenant_id, binding.binding_id,
+                                                    event.external_actor_id)
+        with self.database.sessions() as session:
+            member = session.get(IMMembershipRow, (binding.tenant_id, binding.binding_id, actor_id))
+            return bool(member and member.active and "chat" in member.grants_json)
+
     def record(self, event, binding, lease: AccountLease, *, route=None, trace_id="", next_offset=None):
         if (binding.tenant_id, binding.binding_id, binding.channel.value,
                 binding.external_account_id) != (lease.tenant_id, lease.binding_id, lease.channel,
@@ -165,6 +176,8 @@ class IMIngress:
         if event.message and (event.message.channel, event.message.webhook_public_id) != (binding.channel,
                                                                                           binding.webhook_public_id):
             raise AccountOwnershipError("event does not match authenticated binding")
+        if event.pending_media:
+            raise ValueError("provider media must be staged before durable ingress")
         actor_id = (self.identities.internal_user_id(binding.tenant_id, binding.binding_id, event.external_actor_id)
                     if event.external_actor_id else None)
         if route and (route.tenant_id, route.channel_binding_id, route.agent_app_id,
@@ -196,7 +209,30 @@ class IMIngress:
                                  (key[0], key[1], actor_id), with_for_update=True) if actor_id else None
             allowed = member and member.active and "chat" in member.grants_json
             disposition, reason, inbound_id = "ignored", event.reason, None
-            if event.kind != "ignored":
+            if event.kind == "recall":
+                original = session.get(IMEventReceiptRow, (key[0], key[1], event.recalled_message_id))
+                if original is None or original.inbound_id is None:
+                    disposition, reason = "ignored", "recall_target_not_found"
+                else:
+                    inbound = session.get(InboundMessageRow, original.inbound_id, with_for_update=True)
+                    if inbound is not None:
+                        original_chat = (inbound.payload_json.get("message") or {}).get("external_chat_id")
+                        if event.external_chat_id and original_chat != event.external_chat_id:
+                            disposition, reason = "ignored", "recall_target_mismatch"
+                            inbound = None
+                    if inbound is not None:
+                        if inbound.status in {"pending", "retry", "processing"}:
+                            inbound.status = "failed_final"
+                            inbound.lease_owner = inbound.lease_expires_at = inbound.next_retry_at = None
+                        inbound.error_type = "message_recalled"
+                        for outgoing in session.scalars(select(OutboxMessageRow).where(
+                                OutboxMessageRow.inbound_message_id == inbound.inbound_message_id,
+                                OutboxMessageRow.status.in_(("pending", "retry"))).with_for_update()):
+                            outgoing.status, outgoing.error_type = "dead_letter", "message_recalled"
+                        disposition, reason = "recalled", None
+                    elif reason != "recall_target_mismatch":
+                        disposition, reason = "ignored", "recall_target_not_found"
+            elif event.kind != "ignored":
                 disposition, reason = "rejected", "membership_required"
                 if allowed:
                     if event.kind == "action":

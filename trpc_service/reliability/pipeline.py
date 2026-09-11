@@ -75,6 +75,7 @@ class DurableExecutionPipeline:
                            "execution.id": work.execution_id,
                            "tenant.id": work.tenant_id
                        }):
+            await asyncio.to_thread(self._inbox.require_active, work, worker_id)
             route = ResolvedRoute.model_validate(work.payload["route"])
             if route.tenant_id != work.tenant_id or route.partition_key != work.partition_key:
                 raise ConflictError("durable work item does not match its trusted route")
@@ -99,6 +100,7 @@ class DurableExecutionPipeline:
         if work is None:
             return ()
         message = NormalizedInboundMessage.model_validate(work.payload["message"])
+        await asyncio.to_thread(self._inbox.require_active, work, worker_id)
         route = ResolvedRoute.model_validate(work.payload["route"])
         if route.tenant_id != work.tenant_id or route.partition_key != work.partition_key:
             raise ConflictError("durable work item does not match its trusted route")
@@ -199,7 +201,9 @@ class DurableExecutionPipeline:
                         route=route,
                         message=message,
                         agent_context=agent_context,
+                        attachment_uri_resolver=lambda attachment: attachment.artifact_id,
                 ):
+                    await asyncio.to_thread(self._inbox.require_active, work, worker_id)
                     payload = event.model_dump(mode="json")
                     part_no = len(outputs)
                     event_id = hashlib.sha256(f"{work.execution_id}:{part_no}".encode()).hexdigest()

@@ -14,6 +14,9 @@ from .models import NormalizedInboundMessage
 
 class TelegramAdapter:
 
+    text_limit = 4096
+    text_unit = "characters"
+
     def __init__(self, bot: Bot):
         self.bot = bot
 

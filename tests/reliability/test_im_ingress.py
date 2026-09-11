@@ -11,7 +11,8 @@ from trpc_service.channels.telegram import TelegramAdapter
 from trpc_service.persistence import Database
 from trpc_service.persistence.models import IMMembershipRow, IMEventReceiptRow, InboundMessageRow, IMAccountRow, utcnow
 from trpc_service.persistence.models import TenantRow, ChannelBindingRow
-from trpc_service.reliability.inbox import DuplicatePayloadError
+from trpc_service.reliability.inbox import DuplicatePayloadError, MessageRecalledError
+from trpc_service.channels.events import TransportEvent
 from trpc_service.tenant import ChannelBindingRegistry, MessageRouter, SessionIdentityFactory
 from telegram import Bot
 
@@ -116,6 +117,53 @@ def test_unauthorised_and_ignored_updates_are_durable_without_agent_input(system
     with db.sessions() as session:
         assert session.scalar(select(func.count()).select_from(InboundMessageRow)) == 0
         assert all(row.context_ciphertext is None for row in session.scalars(select(IMEventReceiptRow)))
+
+
+def test_recall_cancels_pending_input_and_unsent_output(system):
+    from trpc_service.persistence.models import OutboxMessageRow
+    from trpc_service.reliability import OutboxRepository
+
+    db, binding, router, _, _, lease, ingress = system
+    event = make_event(binding)
+    route = router.route_message(event.message)
+    grant(db, route)
+    accepted = ingress.record(event, binding, lease, route=route)
+    outbox_id = OutboxRepository(db).enqueue(binding.tenant_id, accepted.inbound_id, 0, {
+        "final": True, "text": "must not be sent"})
+    recall = TransportEvent(event_id="recall-50", kind="recall", recalled_message_id="50",
+                            external_chat_id=event.external_chat_id)
+    receipt = ingress.record(recall, binding, lease)
+    duplicate = ingress.record(recall, binding, lease)
+    assert receipt.disposition == "recalled" and duplicate.duplicate
+    with db.sessions() as session:
+        inbound = session.get(InboundMessageRow, accepted.inbound_id)
+        outgoing = session.get(OutboxMessageRow, outbox_id)
+        assert (inbound.status, inbound.error_type) == ("failed_final", "message_recalled")
+        assert (outgoing.status, outgoing.error_type) == ("dead_letter", "message_recalled")
+
+
+def test_recall_fences_claimed_worker_and_cannot_cross_chat(system):
+    from trpc_service.reliability import InboxRepository
+
+    db, binding, router, _, _, lease, ingress = system
+    event = make_event(binding)
+    route = router.route_message(event.message)
+    grant(db, route)
+    accepted = ingress.record(event, binding, lease, route=route)
+    inbox = InboxRepository(db)
+    work = inbox.claim(worker_id="im-worker", lease_seconds=30, include_im=True)
+    assert work.inbound_message_id == accepted.inbound_id
+
+    mismatch = TransportEvent(event_id="recall-other-chat", kind="recall",
+                              recalled_message_id="50", external_chat_id="other-chat")
+    assert ingress.record(mismatch, binding, lease).reason == "recall_target_mismatch"
+    inbox.require_active(work, "im-worker")
+
+    recall = TransportEvent(event_id="recall-owned-chat", kind="recall",
+                            recalled_message_id="50", external_chat_id=event.external_chat_id)
+    assert ingress.record(recall, binding, lease).disposition == "recalled"
+    with pytest.raises(MessageRecalledError):
+        inbox.require_active(work, "im-worker")
 
 
 def test_failure_rolls_back_inbox_receipt_and_poll_offset(system, monkeypatch):

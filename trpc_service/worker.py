@@ -101,6 +101,9 @@ class AgentWorker:
         except (ValueError, LookupError) as error:
             self.inbox.mark_terminal(work.inbound_message_id, owner, "failed_final", type(error).__name__)
         except Exception as error:
+            if self.inbox.is_recalled(work.inbound_message_id):
+                count("worker.cancelled", reason="message_recalled")
+                return True
             count("worker.failure", reason=type(error).__name__)
             execution.cancel()
             await asyncio.gather(execution, return_exceptions=True)

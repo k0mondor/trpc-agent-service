@@ -1,20 +1,62 @@
 """Typed transport events and receipts; protocol acknowledgements are not read receipts."""
 
+import mimetypes
+import re
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .models import NormalizedInboundMessage
+
+MAX_MEDIA_BYTES = 20 * 1024 * 1024
+
+
+def safe_media_filename(value, kind):
+    default = "image.bin" if kind == "image" else "attachment.bin"
+    if not isinstance(value, str):
+        return default
+    name = value.strip().replace("\\", "/").rsplit("/", 1)[-1]
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name)
+    if name in {"", ".", ".."}:
+        return default
+    stem, dot, suffix = name.rpartition(".")
+    if len(name) > 120:
+        name = (stem[:100] + dot + suffix[:16]) if dot else name[:120]
+    return name
+
+
+def media_mime(filename, fallback="application/octet-stream"):
+    guessed = mimetypes.guess_type(filename)[0]
+    trusted_fallback = (fallback if isinstance(fallback, str)
+                        and re.fullmatch(r"[\w.+-]+/[\w.+-]+", fallback) else None)
+    value = trusted_fallback if trusted_fallback != "application/octet-stream" else guessed or trusted_fallback
+    value = value or "application/octet-stream"
+    return value if isinstance(value, str) and re.fullmatch(r"[\w.+-]+/[\w.+-]+", value) else fallback
+
+
+class PendingMedia(BaseModel):
+    """Authenticated provider reference that must never enter durable storage."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    kind: Literal["image", "file"]
+    resource_id: str = Field(min_length=1, max_length=512, repr=False)
+    filename: str = Field(min_length=1, max_length=255)
+    mime_type: str = Field(min_length=1, max_length=255)
+    download_url: str | None = Field(default=None, max_length=2048, repr=False)
+    encryption_key: str | None = Field(default=None, max_length=512, repr=False)
 
 
 class TransportEvent(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     event_id: str = Field(min_length=1, max_length=255)
-    kind: Literal["chat", "action", "ignored"]
+    kind: Literal["chat", "action", "recall", "ignored"]
     message: NormalizedInboundMessage | None = None
     external_actor_id: str | None = None
     external_chat_id: str | None = None
     action_data: str | None = Field(default=None, max_length=256, repr=False)
+    recalled_message_id: str | None = Field(default=None, min_length=1, max_length=255)
+    pending_media: tuple[PendingMedia, ...] = Field(default=(), repr=False)
     reason: str | None = None
     reply_context: dict = Field(default_factory=dict, repr=False)
 
@@ -32,6 +74,12 @@ class TransportEvent(BaseModel):
             raise ValueError("action requires an actor, conversation and action reference")
         if self.kind != "action" and self.action_data is not None:
             raise ValueError("action reference is only valid for action events")
+        if self.kind == "recall" and not self.recalled_message_id:
+            raise ValueError("recall event requires the original message id")
+        if self.kind != "recall" and self.recalled_message_id is not None:
+            raise ValueError("recalled message id is only valid for recall events")
+        if self.pending_media and self.kind != "chat":
+            raise ValueError("pending media is only valid for chat events")
         if self.kind == "ignored" and not self.reason:
             raise ValueError("ignored event requires a reason")
         return self

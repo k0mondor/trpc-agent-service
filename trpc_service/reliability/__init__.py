@@ -9,6 +9,7 @@ from .inbox import InboxDisposition
 from .inbox import InboxReceipt
 from .inbox import InboxRepository
 from .inbox import InboxWorkItem
+from .inbox import MessageRecalledError
 from .outbox import OutboxItem
 from .outbox import OutboxRepository
 from .pipeline import DurableExecutionPipeline
@@ -35,6 +36,7 @@ __all__ = [
     "InboxReceipt",
     "InboxRepository",
     "InboxWorkItem",
+    "MessageRecalledError",
     "OutboxItem",
     "OutboxRepository",
     "PostTurnRepository",

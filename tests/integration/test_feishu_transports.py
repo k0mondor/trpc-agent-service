@@ -15,7 +15,8 @@ from sqlalchemy import select
 
 from trpc_service.channels.acceptance import AcceptanceRuntime, test_tenant as build_tenant
 from trpc_service.channels.base import CallbackVerificationError
-from trpc_service.channels.feishu import FeishuAdapter, commit_callback, LifecycleLogHandler
+from trpc_service.channels.feishu import FeishuAdapter, commit_callback, LifecycleLogHandler, retry_delay
+from trpc_service.channels.models import AttachmentRef
 from trpc_service.persistence.models import InboundMessageRow
 from trpc_service.tenant import ChannelBindingRegistry, MessageRouter, SessionIdentityFactory, TenantConfig
 from tests.integration.test_tool_acceptance import tool_response
@@ -63,6 +64,9 @@ class Protocol:
         assert request.headers["Authorization"] == "Bearer synthetic-token"
         if request.url.path.endswith("/bot/v3/info"):
             return httpx.Response(200, json={"code": 0, "bot": {"app_id": "cli_test", "open_id": "ou_bot"}})
+        if "/resources/" in request.url.path:
+            return self.result or httpx.Response(200, content=b"synthetic-image",
+                                                 headers={"Content-Type": "image/png"})
         self.sent.append((request.url, json.loads(request.content)))
         if isinstance(self.result, Exception):
             raise self.result
@@ -92,7 +96,26 @@ async def test_public_event_schema_identity_mentions_threads_and_controls():
         assert reply.reply_context["reply_in_thread"] is False
         action = adapter.normalize(frame("/action synthetic-nonce"), binding)
         assert action.kind == "action" and action.message is None
-        assert adapter.normalize(frame(message_type="image"), binding).reason == "unsupported_media"
+        media = adapter.normalize(frame(message_type="image",
+                                        content=json.dumps({"image_key": "img_synthetic"})), binding)
+        assert media.kind == "chat" and media.pending_media[0].kind == "image"
+        group_media = adapter.normalize(frame(group=True, message_type="image",
+                                              content=json.dumps({"image_key": "img_synthetic"})), binding)
+        assert group_media.kind == "chat" and group_media.message.conversation_type.value == "group"
+        payload, filename, mime_type = await adapter.download_media(
+            media.pending_media[0], media.reply_context["message_id"])
+        assert payload == b"synthetic-image" and filename == "image.bin" and mime_type == "image/png"
+        staged = AttachmentRef(artifact_id="artifact://synthetic", filename=filename, mime_type=mime_type,
+                               size_bytes=len(payload), sha256="0" * 64)
+        normalized = adapter.normalize(frame(message_type="image",
+                                             content=json.dumps({"image_key": "img_synthetic"})),
+                                       binding, attachments=(staged,))
+        assert normalized.message.message_type.value == "image" and normalized.message.attachments == (staged,)
+        recall = frame()
+        recall["header"].update(event_id="recall_event", event_type="im.message.recalled_v1")
+        recall["event"] = {"message_id": "om_message", "chat_id": "oc_chat"}
+        recalled = adapter.normalize(recall, binding)
+        assert recalled.kind == "recall" and recalled.recalled_message_id == "om_message"
         wrong = frame()
         wrong["header"]["app_id"] = "cli_other"
         with pytest.raises(CallbackVerificationError):
@@ -103,6 +126,15 @@ async def test_public_event_schema_identity_mentions_threads_and_controls():
             adapter.normalize(wrong, binding)
     finally:
         await adapter.close()
+
+
+def test_retry_after_supports_seconds_and_http_dates():
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert retry_delay("7.5", now=now) == 7.5
+    assert retry_delay("Thu, 01 Jan 2026 00:00:09 GMT", now=now) == 9
+    assert retry_delay("invalid", now=now) == 2
 
 
 @pytest.mark.asyncio
