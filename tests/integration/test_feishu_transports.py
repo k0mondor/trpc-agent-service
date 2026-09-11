@@ -15,7 +15,9 @@ from sqlalchemy import select
 
 from trpc_service.channels.acceptance import AcceptanceRuntime, test_tenant as build_tenant
 from trpc_service.channels.base import CallbackVerificationError
-from trpc_service.channels.feishu import FeishuAdapter, commit_callback, LifecycleLogHandler, retry_delay
+from trpc_service.channels.feishu import (
+    FeishuAdapter, LifecycleLogHandler, commit_callback, retry_delay, unsupported_media_reason,
+)
 from trpc_service.channels.models import AttachmentRef
 from trpc_service.persistence.models import InboundMessageRow
 from trpc_service.tenant import ChannelBindingRegistry, MessageRouter, SessionIdentityFactory, TenantConfig
@@ -135,6 +137,13 @@ def test_retry_after_supports_seconds_and_http_dates():
     assert retry_delay("7.5", now=now) == 7.5
     assert retry_delay("Thu, 01 Jan 2026 00:00:09 GMT", now=now) == 9
     assert retry_delay("invalid", now=now) == 2
+
+
+def test_unsupported_media_diagnostic_only_exposes_safe_type_tokens():
+    assert unsupported_media_reason("post") == "unsupported_media_post"
+    assert unsupported_media_reason("interactive_card") == "unsupported_media_interactive_card"
+    assert unsupported_media_reason("unsafe/type") == "unsupported_media"
+    assert unsupported_media_reason(None) == "unsupported_media"
 
 
 @pytest.mark.asyncio

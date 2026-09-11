@@ -25,6 +25,13 @@ API = "https://open.feishu.cn/open-apis"
 TEXT_BYTES = 3000
 
 
+def unsupported_media_reason(value):
+    """Expose only Feishu's bounded type token, never message content."""
+    if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", value):
+        return "unsupported_media_" + value
+    return "unsupported_media"
+
+
 def retry_delay(value, *, now=None):
     """Parse Retry-After seconds or an HTTP date and keep retries bounded."""
     if value is None:
@@ -204,7 +211,7 @@ class FeishuAdapter:
         chat = tenant_key + ":" + chat_id
         message_type = raw.get("message_type")
         if message_type not in {"text", "image", "file"}:
-            return ignored("unsupported_media")
+            return ignored(unsupported_media_reason(message_type))
         if raw.get("chat_type") not in {"p2p", "group"}:
             return ignored("unsupported_conversation")
         try:
