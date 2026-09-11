@@ -24,6 +24,8 @@ python -m trpc_service._cli live-acceptance --test-timeout 600
 
 ## 当前进展
 
+- [PR 最终架构设计与验收说明](docs/PR最终架构设计与验收说明.md)：面向最终评审的单一入口，逐项覆盖原题多租户、节点部署、多后端同步、两类 IM、治理监控、安全、故障恢复和容量要求，包含系统架构图、企业微信核心时序图、最小数据模型、14 项生产风险、tRPC-Agent-Python 复用边界及真实验收状态。
+
 - [2026-09-11 飞书群媒体与撤回真实验收](docs/飞书群媒体与撤回真实验收-2026-09-11.md)：在 PostgreSQL、Redis、MinIO、双 Worker 常驻环境中完成独立图片、独立文件和已完成入站消息撤回。图片/文件均写入租户 Artifact 并执行一次；撤回回执为 `recalled`，已完成输入保留 `succeeded` 并标记 `message_recalled`。富文本 `post`、真实 429、长文本真实分段和执行中撤回竞态不计作通过。
 
 - [2026-09-07 服务自有原子 Session 与租户 IM 全链路](docs/服务自有原子Session与租户IM全链路-2026-09-07.md)：按用户选择的第二种方案，通过官方公开接口实现 PostgreSQL/Redis 原子存储适配器，接入 protected 运行模式、迁移与双租户配置。附链路图、独立双 Worker 真实 IM 验收入口；本地测试已通过，真实新格式联合验收尚待 Docker 后端就绪。
